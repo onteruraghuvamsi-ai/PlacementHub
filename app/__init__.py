@@ -17,7 +17,7 @@ def create_app(test_config=None):
 
     db.init_app(app)
 
-    from app.models import Application
+    from app.models import Application, InterviewRound
     from app.routes import applications_bp
 
     app.register_blueprint(applications_bp)

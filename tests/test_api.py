@@ -229,3 +229,269 @@ def test_pagination_per_page_over_limit(client):
     assert response.get_json()["error"] == (
         "per_page cannot exceed 100"
     )
+    
+
+
+def test_create_and_get_interview(client):
+    created = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer"
+        }
+    )
+
+    application_id = created.json["id"]
+
+    response = client.post(
+        f"/api/applications/{application_id}/interviews",
+        json={
+            "round_type": "Technical Interview",
+            "interview_date": "2026-09-25",
+            "notes": "Prepare Python and SQL"
+        }
+    )
+
+    assert response.status_code == 201
+
+    # Interview data is nested inside "interview".
+    interview_data = response.json["interview"]
+
+    assert interview_data["round_type"] == "Technical Interview"
+    assert interview_data["interview_date"] == "2026-09-25"
+
+    get_response = client.get(
+        f"/api/applications/{application_id}/interviews"
+    )
+
+    assert get_response.status_code == 200
+
+    interviews = get_response.json["interviews"]
+
+    assert len(interviews) == 1
+    assert interviews[0]["round_type"] == "Technical Interview"
+
+
+def test_update_interview(client):
+    created = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer"
+        }
+    )
+
+    application_id = created.json["id"]
+
+    interview = client.post(
+        f"/api/applications/{application_id}/interviews",
+        json={
+            "round_type": "Technical Interview"
+        }
+    )
+
+    interview_id = interview.json["interview"]["id"]
+
+    response = client.put(
+        f"/api/applications/{application_id}/interviews/{interview_id}",
+        json={
+            "round_type": "Final Interview",
+            "interview_date": "2026-09-28",
+            "notes": "Final discussion"
+        }
+    )
+
+    assert response.status_code == 200
+
+    interview_data = response.json["interview"]
+
+    assert interview_data["round_type"] == "Final Interview"
+    assert interview_data["interview_date"] == "2026-09-28"
+    assert interview_data["notes"] == "Final discussion"
+
+
+def test_delete_interview(client):
+    created = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer"
+        }
+    )
+
+    application_id = created.json["id"]
+
+    interview = client.post(
+        f"/api/applications/{application_id}/interviews",
+        json={
+            "round_type": "HR Interview"
+        }
+    )
+
+    interview_id = interview.json["interview"]["id"]
+
+    response = client.delete(
+        f"/api/applications/{application_id}/interviews/{interview_id}"
+    )
+
+    assert response.status_code == 200
+
+    get_response = client.get(
+        f"/api/applications/{application_id}/interviews"
+    )
+
+    assert get_response.status_code == 200
+    assert get_response.json["interviews"] == []
+
+
+def test_interviews_for_missing_application(client):
+    response = client.get(
+        "/api/applications/9999/interviews"
+    )
+
+    assert response.status_code == 404
+    
+
+def test_create_interview_with_invalid_date(client):
+    created = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer"
+        }
+    )
+
+    application_id = created.json["id"]
+
+    response = client.post(
+        f"/api/applications/{application_id}/interviews",
+        json={
+            "round_type": "Technical Interview",
+            "interview_date": "not-a-date"
+        }
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "interview_date must be a valid YYYY-MM-DD date"
+    )
+
+
+def test_update_missing_interview(client):
+    created = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer"
+        }
+    )
+
+    application_id = created.json["id"]
+
+    response = client.put(
+        f"/api/applications/{application_id}/interviews/9999",
+        json={
+            "round_type": "Final Interview"
+        }
+    )
+
+    assert response.status_code == 404
+    assert response.json["error"] == "Interview round not found"
+
+
+def test_interview_cannot_be_updated_under_wrong_application(client):
+    first_app = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer"
+        }
+    )
+
+    second_app = client.post(
+        "/api/applications",
+        json={
+            "company": "Microsoft",
+            "role": "Software Engineer"
+        }
+    )
+
+    first_id = first_app.json["id"]
+    second_id = second_app.json["id"]
+
+    interview_response = client.post(
+        f"/api/applications/{first_id}/interviews",
+        json={
+            "round_type": "Technical Interview"
+        }
+    )
+
+    interview_id = interview_response.json["interview"]["id"]
+
+    response = client.put(
+        f"/api/applications/{second_id}/interviews/{interview_id}",
+        json={
+            "round_type": "Final Interview"
+        }
+    )
+
+    assert response.status_code == 404
+    assert response.json["error"] == "Interview round not found"
+    
+def test_create_interview_with_non_string_round_type(client):
+    app_response = client.post("/api/applications", json={
+        "company": "Google",
+        "role": "Python Developer"
+    })
+    app_id = app_response.json["id"]
+
+    response = client.post(
+        f"/api/applications/{app_id}/interviews",
+        json={"round_type": 123}
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == "round_type must be a non-empty string"
+
+
+def test_update_interview_with_non_string_notes(client):
+    app_response = client.post("/api/applications", json={
+        "company": "Google",
+        "role": "Python Developer"
+    })
+    app_id = app_response.json["id"]
+
+    interview_response = client.post(
+        f"/api/applications/{app_id}/interviews",
+        json={"round_type": "Technical"}
+    )
+    interview_id = interview_response.json["interview"]["id"]
+
+    response = client.put(
+        f"/api/applications/{app_id}/interviews/{interview_id}",
+        json={"notes": 123}
+    )
+
+    assert response.status_code == 400
+def test_create_interview_with_non_string_notes(client):
+    app_response = client.post(
+        "/api/applications",
+        json={
+            "company": "Google",
+            "role": "Python Developer",
+        },
+    )
+
+    assert app_response.status_code == 201
+    app_id = app_response.json["id"]
+
+    response = client.post(
+        f"/api/applications/{app_id}/interviews",
+        json={
+            "round_type": "Technical",
+            "notes": 123,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == "notes must be a string or null"
