@@ -40,8 +40,14 @@ def create_application():
 
     status = data.get("status", "Applied")
 
-    if status not in VALID_STATUSES:
+    if not isinstance(status, str) or status not in VALID_STATUSES:
         return {"error": "Invalid status"}, 400
+    
+    for field in ("location", "notes"):
+        value = data.get(field)
+
+        if value is not None and not isinstance(value, str):
+            return {"error": f"{field} must be a string or null"}, 400
 
     application = Application(
         company=company.strip(),
@@ -60,6 +66,19 @@ def create_application():
 @applications_bp.route("", methods=["GET"])
 def get_applications():
     stmt = select(Application)
+    
+        # Pagination
+    try:
+        page = int(request.args.get("page", 1))
+        per_page = int(request.args.get("per_page", 10))
+    except ValueError:
+        return {"error": "page and per_page must be integers"}, 400
+
+    if page < 1 or per_page < 1:
+        return {"error": "page and per_page must be positive"}, 400
+
+    if per_page > 100:
+        return {"error": "per_page cannot exceed 100"}, 400
 
     # Search by company or role
     search = request.args.get("search", "").strip()
@@ -89,12 +108,24 @@ def get_applications():
             Application.location.ilike(f"%{location}%")
         )
 
+        # Total matching applications before pagination
+    total = db.session.scalar(
+        select(func.count()).select_from(stmt.subquery())
+    )
+
+    # Fetch only the requested page
     applications = db.session.execute(
         stmt.order_by(Application.id.desc())
+        .limit(per_page)
+        .offset((page - 1) * per_page)
     ).scalars().all()
 
     return {
         "count": len(applications),
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
         "applications": [
             application.to_dict()
             for application in applications
@@ -136,14 +167,17 @@ def update_application(application_id):
             return {"error": "Role cannot be empty"}, 400
         application.role = data["role"].strip()
 
-    if "location" in data:
-        application.location = data["location"]
+    for field in ("location", "notes"):
+        if field in data:
+            value = data[field]
 
-    if "notes" in data:
-        application.notes = data["notes"]
+            if value is not None and not isinstance(value, str):
+                return {"error": f"{field} must be a string or null"}, 400
+
+            setattr(application, field, value)
 
     if "status" in data:
-        if data["status"] not in VALID_STATUSES:
+        if not isinstance(data["status"], str) or data["status"] not in VALID_STATUSES:
             return {"error": "Invalid status"}, 400
         application.status = data["status"]
 

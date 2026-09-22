@@ -1,5 +1,5 @@
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from app import db
 
@@ -23,10 +23,10 @@ class Application(db.Model):
     )
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(
-        db.DateTime,
-        nullable=False,
-        default=datetime.utcnow
-    )
+    db.DateTime(timezone=True),
+    nullable=False,
+    default=lambda: datetime.now(timezone.utc)
+)
 
     def to_dict(self):
         return {
