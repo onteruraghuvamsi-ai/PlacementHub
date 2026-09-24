@@ -4,9 +4,15 @@ from sqlalchemy import select
 from sqlalchemy import func
 
 from app import db
-from app.models import Application, InterviewRound
+from app.models import Application, InterviewRound, User
+from app.services import get_github_organization
+
 from datetime import date
 from flask import jsonify
+from werkzeug.security import generate_password_hash
+from flask_jwt_extended import create_access_token
+from flask_jwt_extended import jwt_required, get_jwt_identity
+
 
 applications_bp = Blueprint(
     "applications",
@@ -22,10 +28,96 @@ VALID_STATUSES = {
     "Rejected"
 }
 
+@applications_bp.route("/signup", methods=["POST"])
+def signup():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return {"error": "Request body must be valid JSON"}, 400
+
+    username = data.get("username")
+    email = data.get("email")
+    password = data.get("password")
+
+    if not isinstance(username, str) or not username.strip():
+        return {"error": "Username is required"}, 400
+
+    if not isinstance(email, str) or not email.strip():
+        return {"error": "Email is required"}, 400
+
+    if not isinstance(password, str) or len(password) < 8:
+        return {"error": "Password must be at least 8 characters"}, 400
+
+    email = email.strip().lower()
+
+    if User.query.filter_by(email=email).first():
+        return {"error": "Email already registered"}, 409
+
+    user = User(
+        username=username.strip(),
+        email=email
+    )
+    user.set_password(password)
+
+    db.session.add(user)
+    db.session.commit()
+
+    return {
+        "message": "User registered successfully",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        }
+    }, 201
+    
+    
+
+@applications_bp.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+
+    email = data.get("email")
+    password = data.get("password")
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    user = User.query.filter_by(email=email).first()
+
+    if user is None or not user.check_password(password):
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    access_token = create_access_token(identity=str(user.id))
+
+    return jsonify({
+        "message": "Login successful",
+        "access_token": access_token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        }
+    }), 200
+    
+
+@applications_bp.route("/protected", methods=["GET"])
+@jwt_required()
+def protected():
+    current_user_id = get_jwt_identity()
+
+    return jsonify({
+        "message": "You are authenticated!",
+        "user_id": current_user_id
+    }), 200
+
 
 # CREATE
 @applications_bp.route("", methods=["POST"])
+@jwt_required()
 def create_application():
+    current_user_id = get_jwt_identity()
+
     data = request.get_json(silent=True)
 
     if not isinstance(data, dict):
@@ -44,7 +136,7 @@ def create_application():
 
     if not isinstance(status, str) or status not in VALID_STATUSES:
         return {"error": "Invalid status"}, 400
-    
+
     for field in ("location", "notes"):
         value = data.get(field)
 
@@ -56,7 +148,8 @@ def create_application():
         role=role.strip(),
         location=data.get("location"),
         status=status,
-        notes=data.get("notes")
+        notes=data.get("notes"),
+        user_id=int(current_user_id)
     )
 
     db.session.add(application)
@@ -66,8 +159,12 @@ def create_application():
 
 # READ ALL + SEARCH + FILTERING
 @applications_bp.route("", methods=["GET"])
+@jwt_required()
 def get_applications():
-    stmt = select(Application)
+    current_user_id = get_jwt_identity()
+    stmt = select(Application).where(
+        Application.user_id == int(current_user_id)
+    )
     
         # Pagination
     try:
@@ -115,9 +212,35 @@ def get_applications():
         select(func.count()).select_from(stmt.subquery())
     )
 
+        # Sorting
+    sort_by = request.args.get("sort_by", "id").strip().lower()
+    order = request.args.get("order", "desc").strip().lower()
+
+    # Allowed columns for sorting
+    SORTABLE_COLUMNS = {
+        "id": Application.id,
+        "company": Application.company,
+        "role": Application.role,
+        "status": Application.status,
+        "location": Application.location,
+    }
+
+    if sort_by not in SORTABLE_COLUMNS:
+        return {"error": "Invalid sort_by field"}, 400
+
+    if order not in ["asc", "desc"]:
+        return {"error": "Invalid sort order"}, 400
+
+    sort_column = SORTABLE_COLUMNS[sort_by]
+
+    if order == "asc":
+        stmt = stmt.order_by(sort_column.asc())
+    else:
+        stmt = stmt.order_by(sort_column.desc())
+
     # Fetch only the requested page
     applications = db.session.execute(
-        stmt.order_by(Application.id.desc())
+        stmt
         .limit(per_page)
         .offset((page - 1) * per_page)
     ).scalars().all()
@@ -137,13 +260,20 @@ def get_applications():
 
 # READ ONE
 @applications_bp.route("/<int:application_id>", methods=["GET"])
+@jwt_required()
 def get_application(application_id):
+    current_user_id = get_jwt_identity()
+
     application = db.session.get(Application, application_id)
 
     if application is None:
         return {"error": "Application not found"}, 404
 
-    return application.to_dict()
+    if application.user_id != int(current_user_id):
+        return {"error": "Application not found"}, 404
+
+        return application.to_dict()
+
 
 # CREATE INTERVIEW ROUND
 @applications_bp.route(
@@ -153,7 +283,7 @@ def get_application(application_id):
 def create_interview(application_id):
     application = db.get_or_404(Application, application_id)
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
 
     # Validate request body
     if not isinstance(data, dict):
@@ -252,7 +382,7 @@ def update_interview(application_id, interview_id):
             "error": "Interview round not found"
         }), 404
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
 
     # Validate request body
     if not isinstance(data, dict):
@@ -330,10 +460,16 @@ def delete_interview(application_id, interview_id):
 
 # UPDATE
 @applications_bp.route("/<int:application_id>", methods=["PUT"])
+@jwt_required()
 def update_application(application_id):
+    current_user_id = get_jwt_identity()
+
     application = db.session.get(Application, application_id)
 
     if application is None:
+        return {"error": "Application not found"}, 404
+
+    if application.user_id != int(current_user_id):
         return {"error": "Application not found"}, 404
 
     data = request.get_json(silent=True)
@@ -344,11 +480,13 @@ def update_application(application_id):
     if "company" in data:
         if not isinstance(data["company"], str) or not data["company"].strip():
             return {"error": "Company cannot be empty"}, 400
+
         application.company = data["company"].strip()
 
     if "role" in data:
         if not isinstance(data["role"], str) or not data["role"].strip():
             return {"error": "Role cannot be empty"}, 400
+
         application.role = data["role"].strip()
 
     for field in ("location", "notes"):
@@ -361,21 +499,29 @@ def update_application(application_id):
             setattr(application, field, value)
 
     if "status" in data:
-        if not isinstance(data["status"], str) or data["status"] not in VALID_STATUSES:
+        if (
+            not isinstance(data["status"], str)
+            or data["status"] not in VALID_STATUSES
+        ):
             return {"error": "Invalid status"}, 400
+
         application.status = data["status"]
 
     db.session.commit()
 
     return application.to_dict()
-
-
 # DELETE
 @applications_bp.route("/<int:application_id>", methods=["DELETE"])
+@jwt_required()
 def delete_application(application_id):
+    current_user_id = get_jwt_identity()
+
     application = db.session.get(Application, application_id)
 
     if application is None:
+        return {"error": "Application not found"}, 404
+
+    if application.user_id != int(current_user_id):
         return {"error": "Application not found"}, 404
 
     db.session.delete(application)
@@ -385,19 +531,25 @@ def delete_application(application_id):
         "message": "Application deleted successfully",
         "id": application_id
     }
-    
 # DASHBOARD STATISTICS
 @applications_bp.route("/stats", methods=["GET"])
+@jwt_required()
 def get_statistics():
+    current_user_id = get_jwt_identity()
+
     total = db.session.scalar(
-        select(func.count()).select_from(Application)
+        select(func.count())
+        .select_from(Application)
+        .where(Application.user_id == int(current_user_id))
     )
 
     status_rows = db.session.execute(
         select(
             Application.status,
             func.count(Application.id)
-        ).group_by(Application.status)
+        )
+        .where(Application.user_id == int(current_user_id))
+        .group_by(Application.status)
     ).all()
 
     status_counts = {
@@ -409,10 +561,6 @@ def get_statistics():
         "total_applications": total,
         "status_counts": status_counts
     }
-    
-from app.services import get_github_organization
-
-
 # EXTERNAL API INTEGRATION
 @applications_bp.route("/github/<string:org_name>", methods=["GET"])
 def github_organization(org_name):
